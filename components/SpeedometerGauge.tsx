@@ -174,7 +174,7 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
             t.gearIndex += 1;
             t.gear = GEAR_RATIOS[t.gearIndex].name;
             t.isShifting = true;
-            t.shiftTimer = 0.18; // quick dual-clutch shift
+            t.shiftTimer = 0.22; // noticeable clutch shift window for visible rev drop
           }
         }
       } else if (brake > 0) {
@@ -189,7 +189,7 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
             t.gearIndex -= 1;
             t.gear = GEAR_RATIOS[t.gearIndex].name;
             t.isShifting = true;
-            t.shiftTimer = 0.14;
+            t.shiftTimer = 0.16;
           }
         } else if (t.gearIndex === 1 && t.speed <= 0.8) {
           t.gearIndex = 0;
@@ -219,21 +219,26 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
         t.rpm += (targetRpm - t.rpm) * Math.min(dt * 8, 1);
       } else {
         const curGear = GEAR_RATIOS[t.gearIndex];
-        const speedInGearRatio = (t.speed - curGear.minSpeed) / (curGear.maxSpeed - curGear.minSpeed);
-        let baseRpm = 2200 + speedInGearRatio * 5600;
+        const prevShiftSpeed = t.gearIndex === 1 ? 0 : GEAR_RATIOS[t.gearIndex - 1].shiftUpSpeed;
+        const gearSpan = Math.max(1, curGear.shiftUpSpeed - prevShiftSpeed);
+        const speedRatio = Math.min(1, Math.max(0, (t.speed - prevShiftSpeed) / gearSpan));
+
+        const startRpmByGear = [850, 1100, 3900, 4300, 4700, 5100, 5500];
+        const baseRpm = startRpmByGear[t.gearIndex] ?? 4000;
+        let targetRpm = baseRpm + speedRatio * (7550 - baseRpm);
 
         if (t.isShifting) {
-          // Clutch disengaged RPM drop
-          baseRpm = Math.max(3800, baseRpm - 1600);
+          // Transmission clutch disengaged: engine revs drop sharply into lower rev range of the new gear
+          targetRpm = baseRpm;
         }
 
-        if (t.speed >= 360) {
-          // Soft rev limiter vibration
-          baseRpm = 7600 + Math.sin(currentTimestamp * 0.05) * 180;
+        if (t.speed >= 315) {
+          // Soft rev limiter vibration at top speed
+          targetRpm = 7350 + Math.sin(currentTimestamp * 0.04) * 160;
         }
 
-        const clampedRpm = Math.max(900, Math.min(8000, baseRpm));
-        t.rpm += (clampedRpm - t.rpm) * Math.min(dt * 15, 1);
+        const clampedRpm = Math.max(850, Math.min(8000, targetRpm));
+        t.rpm += (clampedRpm - t.rpm) * Math.min(dt * 18, 1);
       }
 
       // Update Audio
@@ -279,20 +284,28 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
     if (spd <= 0.8) {
       return { gear: 'N', gearIndex: 0, rpm: 850 };
     }
+
     let gearIdx = 1;
-    for (let i = 1; i < GEAR_RATIOS.length; i++) {
-      if (spd >= GEAR_RATIOS[i].minSpeed) {
-        gearIdx = i;
-      }
-    }
+    if (spd > 264) gearIdx = 6;
+    else if (spd > 208) gearIdx = 5;
+    else if (spd > 152) gearIdx = 4;
+    else if (spd > 102) gearIdx = 3;
+    else if (spd > 58) gearIdx = 2;
+    else gearIdx = 1;
+
     const curGear = GEAR_RATIOS[gearIdx];
-    const range = Math.max(1, curGear.maxSpeed - curGear.minSpeed);
-    const speedInGearRatio = Math.min(1, Math.max(0, (spd - curGear.minSpeed) / range));
-    const calculatedRpm = 2200 + speedInGearRatio * 5600;
+    const prevShiftSpeed = gearIdx === 1 ? 0 : GEAR_RATIOS[gearIdx - 1].shiftUpSpeed;
+    const gearSpan = Math.max(1, curGear.shiftUpSpeed - prevShiftSpeed);
+    const speedRatio = Math.min(1, Math.max(0, (spd - prevShiftSpeed) / gearSpan));
+
+    const startRpmByGear = [850, 1100, 3900, 4300, 4700, 5100, 5500];
+    const baseRpm = startRpmByGear[gearIdx] ?? 4000;
+    const calculatedRpm = baseRpm + speedRatio * (7550 - baseRpm);
+
     return {
       gear: curGear.name,
       gearIndex: gearIdx,
-      rpm: Math.max(900, Math.min(8000, calculatedRpm)),
+      rpm: Math.max(850, Math.min(7800, calculatedRpm)),
     };
   }, []);
 
@@ -334,8 +347,9 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
 
   // Derive effective telemetry if externally controlled or internally simulated
   const effectiveSpeed = externalSpeed !== undefined ? externalSpeed : speed;
-  const effectiveTelemetry = externalSpeed !== undefined ? getTelemetryForSpeed(externalSpeed) : { gear, rpm };
-  const effectiveRpm = effectiveTelemetry.rpm;
+  const externalTelemetry = externalSpeed !== undefined ? getTelemetryForSpeed(externalSpeed) : null;
+  const effectiveRpm = externalTelemetry ? externalTelemetry.rpm : rpm;
+  const effectiveGear = externalTelemetry ? externalTelemetry.gear : gear;
 
   // Speedometer 0 - 320 km/h:
   // Starts at 135 deg (bottom-left) and sweeps 270 deg clockwise to 405 deg (bottom-right)
@@ -380,7 +394,9 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
   // ===================== MINI TACHOMETER CALCULATIONS =====================
   const cxRpm = 250;
   const cyRpm = 172;
-  const rRpmTicks = 38;
+  const rRpmDisc = 46;
+  const rRpmTicks = 39;
+  const rRpmArc = 42;
 
   // Tachometer sweeps 240 deg from 150 deg (7:30) to 390 deg (4:30), with '4' at top (270 deg)
   const rpmToAngle = (val: number) => {
@@ -389,6 +405,30 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
   };
 
   const currentRpmAngle = rpmToAngle(effectiveRpm);
+
+  // Calculate SVG arc path for the dynamic illuminated RPM arc
+  const createRpmArcPath = useCallback(() => {
+    const startAngle = 150;
+    const endAngle = Math.max(150.05, Math.min(390, currentRpmAngle));
+    const startRad = (startAngle * Math.PI) / 180;
+    const endRad = (endAngle * Math.PI) / 180;
+
+    const sx = roundVal(cxRpm + rRpmArc * Math.cos(startRad));
+    const sy = roundVal(cyRpm + rRpmArc * Math.sin(startRad));
+    const ex = roundVal(cxRpm + rRpmArc * Math.cos(endRad));
+    const ey = roundVal(cyRpm + rRpmArc * Math.sin(endRad));
+
+    const sweep = endAngle - startAngle;
+    const largeArc = sweep > 180 ? 1 : 0;
+
+    return {
+      path: `M ${sx} ${sy} A ${rRpmArc} ${rRpmArc} 0 ${largeArc} 1 ${ex} ${ey}`,
+      tipX: ex,
+      tipY: ey,
+    };
+  }, [currentRpmAngle, cxRpm, cyRpm, rRpmArc]);
+
+  const rpmArc = createRpmArcPath();
 
   return (
     <div
@@ -454,13 +494,29 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
               <stop offset="100%" stopColor="#0f172a" />
             </radialGradient>
 
-            {/* Xbox logo green badge gradient */}
-            <radialGradient id="xboxBadgeGrad" cx="38%" cy="35%" r="65%">
-              <stop offset="0%" stopColor="#4ade80" />
-              <stop offset="35%" stopColor="#16a34a" />
-              <stop offset="80%" stopColor="#107c10" />
-              <stop offset="100%" stopColor="#0a4608" />
+            {/* RPM Dial recessed background gradient */}
+            <radialGradient id="rpmDialGrad" cx="50%" cy="42%" r="58%">
+              <stop offset="0%" stopColor="#18231d" />
+              <stop offset="65%" stopColor="#101713" />
+              <stop offset="100%" stopColor="#080c09" />
             </radialGradient>
+
+            {/* Dynamic RPM Arc gradient: Emerald -> Amber -> Redline */}
+            <linearGradient id="rpmArcGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#22c55e" />
+              <stop offset="55%" stopColor="#4ade80" />
+              <stop offset="78%" stopColor="#f59e0b" />
+              <stop offset="100%" stopColor="#ef4444" />
+            </linearGradient>
+
+            {/* RPM soft glow filter */}
+            <filter id="rpmGlow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="3.5" result="coloredBlur" />
+              <feMerge>
+                <feMergeNode in="coloredBlur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
 
             {/* Arc tip radial glow filter */}
             <filter id="tipGlow" x="-50%" y="-50%" width="200%" height="200%">
@@ -556,27 +612,117 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
 
           {/* ================= 3. MINI TACHOMETER (RPM DIAL) ================= */}
           <g id="mini-tachometer">
-            {/* Redline outer sector arc (from ~6.2 to 8 x1000 RPM) */}
+            {/* Recessed Sub-dial Housing for visual depth and consistency */}
+            <circle
+              cx={cxRpm}
+              cy={cyRpm}
+              r={rRpmDisc}
+              fill="url(#rpmDialGrad)"
+              stroke="#27372e"
+              strokeWidth="1.2"
+              filter="drop-shadow(0 2px 8px rgba(0,0,0,0.8))"
+            />
+            <circle
+              cx={cxRpm}
+              cy={cyRpm}
+              r={rRpmDisc - 1}
+              fill="none"
+              stroke="#0f1512"
+              strokeWidth="0.8"
+            />
+
+            {/* Static RPM Track Guide Arc (0 to 8 x1000) */}
+            {(() => {
+              const startRad = (150 * Math.PI) / 180;
+              const endRad = (390 * Math.PI) / 180;
+              const sx = roundVal(cxRpm + rRpmArc * Math.cos(startRad));
+              const sy = roundVal(cyRpm + rRpmArc * Math.sin(startRad));
+              const ex = roundVal(cxRpm + rRpmArc * Math.cos(endRad));
+              const ey = roundVal(cyRpm + rRpmArc * Math.sin(endRad));
+              return (
+                <path
+                  d={`M ${sx} ${sy} A ${rRpmArc} ${rRpmArc} 0 1 1 ${ex} ${ey}`}
+                  fill="none"
+                  stroke="#1c2620"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                />
+              );
+            })()}
+
+            {/* Redline sector accent track (from 6.2 to 8 x1000 RPM) */}
             {(() => {
               const startA = rpmToAngle(6200);
               const endA = rpmToAngle(8000);
               const startR = (startA * Math.PI) / 180;
               const endR = (endA * Math.PI) / 180;
-              const arcRadius = rRpmTicks + 3;
-              const x1 = roundVal(cxRpm + arcRadius * Math.cos(startR));
-              const y1 = roundVal(cyRpm + arcRadius * Math.sin(startR));
-              const x2 = roundVal(cxRpm + arcRadius * Math.cos(endR));
-              const y2 = roundVal(cyRpm + arcRadius * Math.sin(endR));
+              const x1 = roundVal(cxRpm + rRpmArc * Math.cos(startR));
+              const y1 = roundVal(cyRpm + rRpmArc * Math.sin(startR));
+              const x2 = roundVal(cxRpm + rRpmArc * Math.cos(endR));
+              const y2 = roundVal(cyRpm + rRpmArc * Math.sin(endR));
               return (
                 <path
-                  d={`M ${x1} ${y1} A ${arcRadius} ${arcRadius} 0 0 1 ${x2} ${y2}`}
+                  d={`M ${x1} ${y1} A ${rRpmArc} ${rRpmArc} 0 0 1 ${x2} ${y2}`}
                   fill="none"
                   stroke="#ef4444"
-                  strokeWidth="2"
+                  strokeWidth="2.8"
                   strokeLinecap="round"
+                  opacity="0.85"
                 />
               );
             })()}
+
+            {/* Dynamic Illuminated RPM Glow Arc */}
+            {effectiveRpm > 300 && (
+              <>
+                {/* Soft ambient glow trail */}
+                <path
+                  d={rpmArc.path}
+                  fill="none"
+                  stroke="url(#rpmArcGrad)"
+                  strokeWidth="5.5"
+                  strokeLinecap="round"
+                  opacity="0.4"
+                  filter="url(#rpmGlow)"
+                />
+                {/* Sharp core arc */}
+                <path
+                  d={rpmArc.path}
+                  fill="none"
+                  stroke="url(#rpmArcGrad)"
+                  strokeWidth="2.6"
+                  strokeLinecap="round"
+                />
+                {/* Glowing leading tip */}
+                <circle
+                  cx={rpmArc.tipX}
+                  cy={rpmArc.tipY}
+                  r="2"
+                  fill="#ffffff"
+                  filter="url(#rpmGlow)"
+                />
+              </>
+            )}
+
+            {/* Shift Light Warning at Top of Tachometer */}
+            {effectiveRpm >= 6800 && (
+              <g id="rpm-shift-light">
+                <circle
+                  cx={cxRpm}
+                  cy={cyRpm - rRpmDisc + 4.5}
+                  r="3.5"
+                  fill="#ef4444"
+                  filter="url(#tipGlow)"
+                  className="animate-pulse"
+                />
+                <circle
+                  cx={cxRpm}
+                  cy={cyRpm - rRpmDisc + 4.5}
+                  r="1.5"
+                  fill="#ffffff"
+                />
+              </g>
+            )}
 
             {/* Half-tick intermediate marks (0.5 to 7.5) */}
             {[0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5].map((val) => {
@@ -596,7 +742,7 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
                   x2={x2}
                   y2={y2}
                   stroke={isRed ? '#ef4444' : '#64748b'}
-                  strokeWidth="0.8"
+                  strokeWidth="0.9"
                 />
               );
             })}
@@ -606,8 +752,9 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
               const angle = rpmToAngle(val * 1000);
               const rad = (angle * Math.PI) / 180;
               const isRed = val >= 7;
-              const x1 = roundVal(cxRpm + (rRpmTicks - 5) * Math.cos(rad));
-              const y1 = roundVal(cyRpm + (rRpmTicks - 5) * Math.sin(rad));
+              const isNearNeedle = Math.abs(effectiveRpm - val * 1000) < 450;
+              const x1 = roundVal(cxRpm + (rRpmTicks - 5.5) * Math.cos(rad));
+              const y1 = roundVal(cyRpm + (rRpmTicks - 5.5) * Math.sin(rad));
               const x2 = roundVal(cxRpm + rRpmTicks * Math.cos(rad));
               const y2 = roundVal(cyRpm + rRpmTicks * Math.sin(rad));
 
@@ -622,15 +769,16 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
                     y1={y1}
                     x2={x2}
                     y2={y2}
-                    stroke={isRed ? '#ef4444' : '#cbd5e1'}
-                    strokeWidth="1.2"
+                    stroke={isRed ? '#ef4444' : isNearNeedle ? '#38bdf8' : '#e2e8f0'}
+                    strokeWidth={isNearNeedle ? '1.8' : '1.3'}
                   />
                   <text
                     x={tx}
                     y={ty}
-                    fill={isRed ? '#ef4444' : '#cbd5e1'}
-                    fontSize="7"
-                    fontWeight="600"
+                    fill={isRed ? '#ef4444' : isNearNeedle ? '#38bdf8' : '#f8fafc'}
+                    fontSize="8.5"
+                    fontWeight={isNearNeedle ? '700' : '600'}
+                    fontFamily="system-ui, -apple-system, sans-serif"
                     textAnchor="middle"
                     dominantBaseline="central"
                   >
@@ -640,49 +788,68 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
               );
             })}
 
-            {/* "RPM" and "x 1000" labels */}
+            {/* Sub-dial Branding & Live Digital Readout */}
             <text
               x={cxRpm}
-              y={cyRpm + 12}
-              fill="#94a3b8"
-              fontSize="6.5"
-              fontWeight="600"
-              letterSpacing="0.6"
+              y={cyRpm + 13}
+              fill="#cbd5e1"
+              fontSize="6.8"
+              fontWeight="700"
+              letterSpacing="0.8"
+              fontFamily="system-ui, sans-serif"
               textAnchor="middle"
             >
               RPM
             </text>
             <text
               x={cxRpm}
-              y={cyRpm + 19}
+              y={cyRpm + 21}
+              fill={effectiveRpm >= 6800 ? '#ef4444' : '#38bdf8'}
+              fontSize="7.2"
+              fontWeight="700"
+              fontFamily="ui-monospace, SFMono-Regular, monospace"
+              textAnchor="middle"
+              className="transition-colors duration-150"
+            >
+              {Math.round(effectiveRpm)}
+            </text>
+            <text
+              x={cxRpm}
+              y={cyRpm + 28}
               fill="#64748b"
-              fontSize="5"
-              fontWeight="500"
-              letterSpacing="0.3"
+              fontSize="4.8"
+              fontWeight="600"
+              letterSpacing="0.4"
+              fontFamily="system-ui, sans-serif"
               textAnchor="middle"
             >
-              x 1000
+              x 1000 r/min
             </text>
 
-            {/* Mini RPM Needle with smooth transition */}
+            {/* Mini RPM Needle with smooth, jitter-free SVG mechanical response */}
             <g
               id="rpm-needle-assembly"
               transform={`rotate(${roundVal(currentRpmAngle)}, ${cxRpm}, ${cyRpm})`}
-              style={{
-                transform: `rotate(${roundVal(currentRpmAngle)}deg)`,
-                transformOrigin: `${cxRpm}px ${cyRpm}px`,
-                transformBox: 'view-box',
-                transition: 'transform 260ms cubic-bezier(0.2, 0.9, 0.3, 1)',
-                willChange: 'transform',
-              }}
               filter="url(#needleShadow)"
             >
+              {/* Tapered Luminescent Needle Blade */}
               <polygon
-                points={`${cxRpm - 5},${cyRpm - 0.8} ${cxRpm + 25},${cyRpm} ${cxRpm - 5},${cyRpm + 0.8}`}
+                points={`${cxRpm - 6},${cyRpm - 0.9} ${cxRpm + 27},${cyRpm} ${cxRpm - 6},${cyRpm + 0.9}`}
                 fill="#ffffff"
               />
-              <circle cx={cxRpm} cy={cyRpm} r="3.2" fill="#151b18" stroke="#334155" strokeWidth="0.8" />
-              <circle cx={cxRpm} cy={cyRpm} r="1.2" fill="#ffffff" />
+              {/* Needle Counter-balance Accent */}
+              <line
+                x1={cxRpm - 6}
+                y1={cyRpm}
+                x2={cxRpm - 9}
+                y2={cyRpm}
+                stroke="#cbd5e1"
+                strokeWidth="1.2"
+              />
+              {/* Multi-layered Hub Cap Matching Main Speedometer */}
+              <circle cx={cxRpm} cy={cyRpm} r="4" fill="url(#hubGrad)" stroke="#334155" strokeWidth="0.8" />
+              <circle cx={cxRpm} cy={cyRpm} r="2.2" fill="#0f172a" />
+              <circle cx={cxRpm} cy={cyRpm} r="1" fill="#f8fafc" />
             </g>
           </g>
 
@@ -736,7 +903,43 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
             opacity="0.9"
           />
 
-          {/* ================= 5. CENTER DIGITAL READOUT ================= */}
+          {/* ================= 5. GEAR INDICATOR BADGE ================= */}
+          <g id="gear-indicator-badge">
+            <rect
+              x={cx - 24}
+              y={271}
+              width="48"
+              height="21"
+              rx="5"
+              fill="#101713"
+              stroke="#24362b"
+              strokeWidth="1.2"
+              filter="url(#needleShadow)"
+            />
+            <text
+              id="gear-indicator-value"
+              x={cx}
+              y={282}
+              fill={
+                effectiveGear === 'N'
+                  ? '#94a3b8'
+                  : effectiveRpm >= 6800
+                  ? '#ef4444'
+                  : '#22c55e'
+              }
+              fontSize="13"
+              fontWeight="800"
+              fontFamily="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif"
+              textAnchor="middle"
+              dominantBaseline="central"
+              letterSpacing="1.2"
+              className="transition-colors duration-150"
+            >
+              {effectiveGear === 'N' ? 'N' : effectiveGear.replace('D', 'D ')}
+            </text>
+          </g>
+
+          {/* ================= 6. CENTER DIGITAL READOUT ================= */}
           {/* Large Digital Speed Readout */}
           <text
             id="digital-speed-display"
@@ -767,7 +970,7 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
             km/h
           </text>
 
-          {/* ================= 6. MAIN SPEEDOMETER NEEDLE ================= */}
+          {/* ================= 7. MAIN SPEEDOMETER NEEDLE ================= */}
           <g
             id="main-needle-assembly"
             transform={`rotate(${currentSpeedAngle}, ${cx}, ${cy})`}
@@ -862,10 +1065,20 @@ export default function SpeedometerGauge({ className = '', speed: externalSpeed 
       {!isAutoPlay && (
         <div
           id="manual-speed-scrubber-container"
-          className="mt-3 flex items-center gap-3 w-full max-w-[320px] px-3.5 py-1.5 rounded-xl bg-neutral-900/70 border border-neutral-800 text-xs text-neutral-300 z-10"
+          className="mt-3 flex items-center gap-3 w-full max-w-[340px] px-3.5 py-1.5 rounded-xl bg-neutral-900/70 border border-neutral-800 text-xs text-neutral-300 z-10"
         >
-          <span className="text-[11px] text-neutral-400 font-medium whitespace-nowrap min-w-[76px]">
+          <span className="text-[11px] text-neutral-400 font-medium whitespace-nowrap min-w-[70px]">
             {Math.round(speed)} km/h
+          </span>
+          <span
+            id="scrubber-gear-pill"
+            className={`text-[10px] font-bold px-1.5 py-0.5 rounded border transition-colors ${
+              effectiveGear === 'N'
+                ? 'bg-neutral-800/80 border-neutral-700 text-neutral-400'
+                : 'bg-emerald-950/70 border-emerald-600/50 text-emerald-300'
+            }`}
+          >
+            {effectiveGear}
           </span>
           <input
             id="speed-scrubber-slider"
